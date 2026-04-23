@@ -98,6 +98,14 @@
                                             <p class="flex flex-wrap items-center gap-1 font-medium dark:text-white">
                                                 @{{ activity.title }}
 
+                                                <!-- Notes Count Badge -->
+                                                <span
+                                                    v-if="activity.notes_count && activity.type != 'note'"
+                                                    class="inline-flex items-center rounded-full bg-orange-100 px-2 py-0.5 text-xs font-medium text-orange-700 dark:bg-orange-800 dark:text-orange-200"
+                                                >
+                                                    <span class="icon-note mr-1 text-sm"></span>@{{ activity.notes_count }}
+                                                </span>
+
                                                 <template v-if="activity.type == 'system' && activity.additional">
                                                     <p class="flex items-center gap-1">
                                                         <span>:</span>
@@ -195,6 +203,48 @@
 
                                         {!! view_render_event('admin.components.activities.content.activity.item.description.after') !!}
 
+                                        <!-- Linked Notes -->
+                                        <template v-if="activity.notes && activity.notes.length && activity.type != 'note'">
+                                            <div class="flex flex-col gap-2 rounded-md border border-orange-300 bg-orange-50 p-2 dark:border-orange-700 dark:bg-gray-800">
+                                                <p class="text-xs font-semibold text-orange-700 dark:text-white">
+                                                    @lang('admin::app.components.activities.index.notes') (@{{ activity.notes.length }})
+                                                </p>
+
+                                                <div
+                                                    class="flex flex-col gap-1 border-t border-orange-200 pt-1 dark:border-orange-700"
+                                                    v-for="note in activity.notes"
+                                                >
+                                                    <div class="flex items-start justify-between gap-2">
+                                                        <p
+                                                            class="text-sm text-gray-700 dark:text-white"
+                                                            v-safe-html="note.comment"
+                                                        ></p>
+
+                                                        <div class="flex shrink-0 gap-1">
+                                                            @if (bouncer()->hasPermission('activities.edit'))
+                                                                <button
+                                                                    class="icon-edit cursor-pointer text-lg text-gray-400 transition hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+                                                                    @click="editNote(note)"
+                                                                ></button>
+                                                            @endif
+
+                                                            @if (bouncer()->hasPermission('activities.delete'))
+                                                                <button
+                                                                    class="icon-delete cursor-pointer text-lg text-gray-400 transition hover:text-red-500 dark:text-gray-500 dark:hover:text-red-400"
+                                                                    @click="removeNote(note, activity)"
+                                                                ></button>
+                                                            @endif
+                                                        </div>
+                                                    </div>
+
+                                                    <p class="text-xs text-gray-500 dark:text-gray-400">
+                                                        @{{ $admin.formatDate(note.created_at, 'd MMM yyyy, h:mm A', timezone) }}
+                                                        <template v-if="note.user">· @{{ note.user.name }}</template>
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        </template>
+
                                         {!! view_render_event('admin.components.activities.content.activity.item.attachments.before') !!}
 
                                         <!-- Attachments -->
@@ -261,6 +311,19 @@
                                                 {!! view_render_event('admin.components.activities.content.activity.item.more_actions.dropdown.menu_item.before') !!}
 
                                                 <template v-if="activity.type != 'email'">
+                                                    @if (bouncer()->hasPermission('activities.create'))
+                                                        <x-admin::dropdown.menu.item
+                                                            v-if="['call', 'meeting', 'lunch'].includes(activity.type)"
+                                                            @click="addNoteToActivity(activity)"
+                                                        >
+                                                            <div class="flex items-center gap-2">
+                                                                <span class="icon-note text-2xl"></span>
+
+                                                                @lang('admin::app.components.activities.index.add-note')
+                                                            </div>
+                                                        </x-admin::dropdown.menu.item>
+                                                    @endif
+
                                                     @if (bouncer()->hasPermission('activities.edit'))
                                                         <x-admin::dropdown.menu.item
                                                             v-if="! activity.is_done && ['call', 'meeting', 'lunch'].includes(activity.type)"
@@ -283,6 +346,17 @@
 
                                                                 @lang('admin::app.components.activities.index.edit')
                                                             </a>
+                                                        </x-admin::dropdown.menu.item>
+
+                                                        <x-admin::dropdown.menu.item
+                                                            v-if="activity.type == 'note'"
+                                                            @click="editNote(activity)"
+                                                        >
+                                                            <div class="flex items-center gap-2">
+                                                                <span class="icon-edit text-2xl"></span>
+
+                                                                @lang('admin::app.components.activities.index.edit')
+                                                            </div>
                                                         </x-admin::dropdown.menu.item>
                                                     @endif
 
@@ -541,7 +615,46 @@
                     });
                 }
 
-                this.$emitter.on('on-activity-added', (activity) => this.activities.unshift(activity));
+                this.$emitter.on('on-activity-added', (activity) => {
+                    this.activities.unshift(activity);
+
+                    if (activity.parent_activity_id) {
+                        const parent = this.activities.find(a => a.id === activity.parent_activity_id);
+
+                        if (parent) {
+                            if (! parent.notes) parent.notes = [];
+                            parent.notes.push({
+                                id: activity.id,
+                                comment: activity.comment,
+                                created_at: activity.created_at,
+                                user: activity.user,
+                            });
+                            parent.notes_count = (parent.notes_count || 0) + 1;
+                        }
+                    }
+                });
+
+                this.$emitter.on('on-note-updated', (updatedNote) => {
+                    // Update standalone note in activities list
+                    const actIndex = this.activities.findIndex(a => a.id === updatedNote.id);
+
+                    if (actIndex !== -1) {
+                        this.activities[actIndex].comment = updatedNote.comment;
+                    }
+
+                    // Update note inside parent's notes array
+                    if (updatedNote.parent_activity_id) {
+                        const parent = this.activities.find(a => a.id === updatedNote.parent_activity_id);
+
+                        if (parent && parent.notes) {
+                            const noteIndex = parent.notes.findIndex(n => n.id === updatedNote.id);
+
+                            if (noteIndex !== -1) {
+                                parent.notes[noteIndex].comment = updatedNote.comment;
+                            }
+                        }
+                    }
+                });
             },
 
             methods: {
@@ -608,6 +721,43 @@
                                 .catch((error) => {
                                     this.isUpdating[activity.id] = false;
 
+                                    this.$emitter.emit('add-flash', { type: 'error', message: error.response.data.message });
+                                });
+                        },
+                    });
+                },
+
+                addNoteToActivity(activity) {
+                    this.$emitter.emit('open-note-for-activity', { activityId: activity.id });
+                },
+
+                editNote(note) {
+                    this.$emitter.emit('open-edit-note', note);
+                },
+
+                removeNote(note, parentActivity) {
+                    this.$emitter.emit('open-confirm-modal', {
+                        agree: () => {
+                            this.$axios.delete("{{ route('admin.activities.delete', 'replaceId') }}".replace('replaceId', note.id))
+                                .then((response) => {
+                                    // Remove from parent's notes array
+                                    const noteIndex = parentActivity.notes.findIndex(n => n.id === note.id);
+
+                                    if (noteIndex !== -1) {
+                                        parentActivity.notes.splice(noteIndex, 1);
+                                        parentActivity.notes_count = Math.max((parentActivity.notes_count || 1) - 1, 0);
+                                    }
+
+                                    // Also remove from main activities list if present
+                                    const actIndex = this.activities.findIndex(a => a.id === note.id);
+
+                                    if (actIndex !== -1) {
+                                        this.activities.splice(actIndex, 1);
+                                    }
+
+                                    this.$emitter.emit('add-flash', { type: 'success', message: response.data.message });
+                                })
+                                .catch((error) => {
                                     this.$emitter.emit('add-flash', { type: 'error', message: error.response.data.message });
                                 });
                         },
